@@ -7,8 +7,8 @@
 
 或者
 
-- src/app/ 非压缩包
-- src/install.sh 安装脚本
+- app/ 非压缩包
+- install.sh 安装脚本
 
 修改 install.sh
 
