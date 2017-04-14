@@ -1,0 +1,314 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+import re
+import os
+import sys
+import time
+import urllib
+import httplib
+import hashlib
+import subprocess
+from functools import partial
+from optparse import OptionParser
+from HTMLParser import HTMLParser
+
+HTTP_SERVER = "192.168.2.26:10088"
+
+# 以下配置一般不需要修改
+PACKAGE_URI = "/packages/"
+PACKAGE_URL = "http://" + HTTP_SERVER + PACKAGE_URI
+MD5SUM_FILE = 'md5sum.txt'
+MD5SUM_FILE_URL = PACKAGE_URL + MD5SUM_FILE
+DOWNLOAD_HOME = "/tmp/insapp/"
+MD5SUM_LOCAL_PATH = DOWNLOAD_HOME + MD5SUM_FILE
+BIN_FILE_PATTERN = "^[a-z0-9].*bin$"
+MAX_STATUS_LENGTH = 50
+
+# 安装 app
+class InsApp():
+    def install(self, appFileList, quietMode=False):
+
+        httpClient = HTTPClient()
+
+        print('\n########################### 检查 app 资源 ######################\n')
+        normalList, unnormalList = httpClient.appFileExist(appFileList)
+        for appfile in normalList:
+            formatStringOutput(appfile.replace('.bin', ''), '可下载')
+        if len(unnormalList) != 0:
+            for appfile in unnormalList:
+                formatStringOutput(appfile.replace('.bin', ''), '不可用')
+            sys.exit(1)
+
+        # 是否使用静默模式
+        if quietMode:
+            rs = 'yes'
+        else:
+            rs = raw_input("\n确定安装以上 app [y|n]: ")
+        if not re.match('y|yes', rs):
+            print('退出安装')
+            sys.exit(1)
+
+        print('\n########################### 下载 app 资源 ######################\n')
+        httpClient.getChecksumRecord()
+        httpClient.getAppFile(appFileList)
+
+        print('\n########################### 安装 app 文件 ######################\n')
+        for filename in appFileList:
+            if re.match(BIN_FILE_PATTERN, filename):
+                filepath = DOWNLOAD_HOME + filename
+            else:
+                filepath = DOWNLOAD_HOME + filename + '.bin'
+            if quietMode:
+                subprocess.call("echo y | /bin/bash " + filepath, shell=True)
+            else:
+                subprocess.call("/bin/bash " + filepath, shell=True)
+
+# 通过 HTTP 获取文件资源
+class HTTPClient():
+
+    def __init__(self):
+        self.conn = httplib.HTTPConnection(HTTP_SERVER)
+
+    # 通过 URI 获取 HTML 页面数据
+    def getHTML(self, uri):
+        try:
+            self.conn.request("GET", uri + "/")
+        except:
+            print("访问异常：http://" + HTTP_SERVER + uri)
+            self.conn.close()
+            sys.exit(1)
+        rs = self.conn.getresponse()
+        # 先读取 data 再关闭连接，否则获取不了数据
+        data = rs.read()
+        self.conn.close()
+        return data
+
+    # 获取文件列表
+    def getFileList(self):
+        data = self.getHTML(PACKAGE_URI)
+        parseHTMLData = ParseHTMLData()
+        parseHTMLData.feed(data)
+        return parseHTMLData.ParseHTMLData()
+
+    # 模糊搜索文件
+    def matchFile(self, pattern):
+        fileList = self.getFileList()
+        for p in pattern:
+            pLower = p.lower()
+            if not re.match('^[0-9a-z.].*', pLower):
+                print('文件表达式不正确：[' + p + ']，必须以这些字符开头：0-9a-z. ，英文字母不分大小写')
+                sys.exit(1)
+            pLowerFuzzy = '.*' + pLower
+            for file in fileList:
+                if re.match(pLowerFuzzy, file):
+                    print(file.replace(".bin", ""))
+
+    # 每次下载一个文件
+    def getFile(self, fileurl, localpath, override=True):
+        # 预先判断服务器是否存在该文件
+        if not self.fileExists(fileurl):
+            print('URL 不可访问：' + fileurl)
+            return False
+        # 判断本地是否已存在该文件
+        if os.path.exists(localpath):
+            if not override:
+                return True
+        if not os.path.exists(DOWNLOAD_HOME):
+            os.mkdir(DOWNLOAD_HOME)
+        # 下载文件
+        print('保存文件：' + localpath + '\t')
+        try:
+            urllib.urlretrieve(fileurl, localpath, self.reporthook)
+            print('\t\t\t\t\t\t成功')
+            return True
+        except:
+            print('\t\t\t\t\t\t异常')
+            return False
+        
+
+    # 下载一个或者多个 app 文件
+    def getAppFile(self, appFileList):
+        # 下载 app 文件
+        downloadedList = list()
+        for appfile in appFileList:
+            if re.match(BIN_FILE_PATTERN, appfile):
+                filename = appfile
+            else:
+                filename = appfile + '.bin'
+            fileurl = PACKAGE_URL + filename
+            localpath = DOWNLOAD_HOME + filename
+            if self.getFile(fileurl, localpath):
+                downloadedList.append(localpath)
+            else:
+                sys.exit(1)
+        print
+        # 校验本地已存在的 app 文件: 包括刚下载的和之前已下载的
+        for appfile in downloadedList:
+            print("校验文件：" + appfile)
+            if self.diffAppFileChecksum(appfile): 
+                formatStringOutput('md5sum', '成功')
+            else:
+                formatStringOutput('md5sum', '文件已损坏或 checksum 中没有相关记录')
+                sys.exit(1)
+        print
+
+    # 判断服务器是否存在该文件
+    def fileExists(self, fileurl):
+        filehandle = urllib.urlopen(fileurl)
+        httpCode = filehandle.code
+        filehandle.close()
+        if httpCode == 404:
+            return False
+        else:
+            return True
+
+    # 判断服务器的 app 文件是否可用
+    def appFileExist(self, appFileList):
+        normalList = list()
+        unnormalList = list()
+        for appfile in appFileList:
+            if re.match(BIN_FILE_PATTERN, appfile):
+                filename = appfile
+            else:
+                filename = appfile + '.bin'
+            fileurl = PACKAGE_URL + filename
+            if self.fileExists(fileurl):
+                normalList.append(filename)
+            else:
+                unnormalList.append(filename)
+        return normalList, unnormalList
+
+    # 文件下载进度报告
+    def reporthook(self, blocknum, blocksize, totalsize):
+        '''
+        @blocknum: 已经下载的数据块 
+        @blocksize: 数据块的大小 
+        @totalsize: 远程文件的大小 
+        '''  
+        percent = 100.0 * blocknum * blocksize / totalsize
+        if percent > 100:
+            percent = 100
+        sys.stdout.write(str(int(percent)) + '%\r')
+        sys.stdout.flush()
+
+    # 下载校验文件
+    def getChecksumRecord(self):
+        if not self.getFile(MD5SUM_FILE_URL, MD5SUM_LOCAL_PATH, override=True):
+            sys.exit(1)
+        
+    # 文件校验
+    def diffAppFileChecksum(self, appFilePath):
+        # 计算 bin 文件的 md5sum
+        with open(appFilePath, 'rb') as f:
+            d = hashlib.md5()
+            for buf in iter(partial(f.read, 128), b''):
+                d.update(buf)
+            localAppChecksum = d.hexdigest()
+        # 把本地文件的 md5sum 与 md5sum.txt 中的记录做校验
+        f = open(MD5SUM_LOCAL_PATH, 'r')
+        lines = f.readlines()
+        for line in lines:
+            if re.match(BIN_FILE_PATTERN, line):
+                # split() 方法默认去掉所有空格，不要自作多情地加个类似 ' ' 这样的分隔符参数
+                md5sumRecord = line.split()[0]
+                appnameRecord = line.split()[1]
+                if os.path.basename(appFilePath) == appnameRecord and localAppChecksum == md5sumRecord:
+                    f.close()
+                    return True
+        f.close()
+        return False
+
+# 解析一个 HTML 页面
+class ParseHTMLData(HTMLParser):
+    # 覆盖 HTMLParser.HTMLParser 类的初始化函数，
+    # 这样才能增加一个用于返回数据的变量
+    def __init__(self):
+        HTMLParser.__init__(self)
+        self.fileList = list()
+    # handle_starttag 方法会被循环调用，因此不适合在里面返回数据，
+    # 需要额外的方法来专门用于返回初始化函数里面的变量
+    def handle_starttag(self, tag, attrs):
+        # 只处理 <a> 开头的标签
+        if tag == 'a':
+            for name, value in attrs:
+                # 只处理有 href 的属性
+                if name == 'href':
+                    # 只显示以 .bin 结尾的文件名
+                    if re.match(BIN_FILE_PATTERN, value):
+                        self.fileList.append(value)
+    # 此方法用于返回 self.fileList 变量
+    def ParseHTMLData(self):
+        return self.fileList
+
+# 在同一行上的两个字符串之间补上一些空白，使得输出看起来比较整洁
+def formatStringOutput(str1, str2):
+    str1len = len(str1)
+    sys.stdout.write(str1)
+    if str1len < MAX_STATUS_LENGTH:
+        for i in range(str1len, MAX_STATUS_LENGTH):
+            sys.stdout.write(' ')
+    print(str2)
+
+# 解析命令行参数，并返回解析结果
+def parseArguments():
+    parser = OptionParser(usage="usage: %prog [options]")
+    # nargs 不支持 * + ？ 动态参数形式，所以如果一个操作需要输入多个值时，需要使用双引号将他们括起来
+    # help 不支持中文，所以 ...
+    parser.add_option("-i", metavar="\"app1 [app2 ..]\"", help="install one or more apps")
+    parser.add_option("-s", metavar='\"app1 [app2 ..]\"', help="search one or more apps by regular expression")
+    parser.add_option("-d", metavar='\"app1 [app2 ..]\"', help="only download install one or more apps")
+    parser.add_option("-l", metavar='[none args]', nargs=0, help="only list all provided bin files")
+    parser.add_option("-u", metavar='[none args]', nargs=0, help="only update local md5 checksum record")
+    parser.add_option("-y", metavar='[none args]', nargs=0, help="quiet mode, only use it when -i is provided")
+    if len(sys.argv) == 1:
+        parser.print_help()
+        print '''
+e.g. :
+    python %s -l
+    python %s -u
+    python %s -s kafka .*keep
+    python %s -d kafka
+    python %s -i zookeeper-3.4.9 kafka_2.10-0.10.1.1
+            ''' %(sys.argv[0], sys.argv[0], sys.argv[0], sys.argv[0], sys.argv[0])
+        sys.exit()
+    else:
+        (options, args) = parser.parse_args()
+        return options
+
+############################### 入口函数 ##################################
+if __name__ == "__main__":
+    httpClient = HTTPClient()
+    # 解析参数
+    args = parseArguments()
+    # 解析 -l
+    if args.l is not None:
+        fileList = httpClient.getFileList()
+        for file in fileList:
+            print(file.replace('.bin', ''))
+        sys.exit(0)
+    # 解析 -u
+    if args.u is not None:
+        httpClient.getChecksumRecord()
+        sys.exit(0)
+    # 解析 -s
+    if args.s is not None:
+        httpClient.matchFile(args.s.split())
+        sys.exit(0)
+    # 解析 -d
+    if args.d is not None:
+        httpClient.getChecksumRecord()
+        httpClient.getAppFile(args.d.split())
+        sys.exit(0)
+    # 解析 -y
+    if args.y is not None:
+        if args.i is None:
+            print('只有使用参数 -i 时才能使用静默模式')
+            sys.exit(1)
+    # 解析 -i
+    if args.i is not None:
+        if isinstance(args.y, tuple):
+            quietMode = True
+        else:
+            quietMode = False
+        insApp = InsApp()
+        insApp.install(args.i.split(), quietMode)

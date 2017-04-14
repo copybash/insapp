@@ -1,0 +1,121 @@
+#!/bin/bash
+
+# install.sh 脚本规范
+# 1. 配置
+#   只需要修改 APP_SOFT_LINK
+# 2. 函数
+#   check() 安装前必须做的检查操作，如有必要自定义检查操作
+#   install() 安装的具体操作，如有必要自定义安装操作
+
+################################ 安装配置 #################################
+# [不需要修改] 临时目录
+TMP_HOME=/tmp/insapp
+# [不需要修改] tar.gz 文件提取临时目录
+TARBALL=$TMP_HOME/install.tar.gz
+# [不需要修改] 按照运维规范指定的安装目录
+APP_INSTALL_HOME=/data/app
+APP_NAME=$(basename $0 | sed 's#.bin##g')
+APP_INSTALL_PATH=$APP_INSTALL_HOME/$APP_NAME
+# [必须修改] 按照运维规范指定的软连接目录
+APP_SOFT_LINK=/usr/local/kafka
+
+################################ 功能函数 #################################
+# [不需要修改]
+function log()
+{
+        local level=$1
+        shift
+        local msg=$*
+        case $level in
+                info)   echo -e "[INFO] $msg";;
+                note)   echo -e "\033[92m[NOTE] $msg\033[0m";;
+                warn)   echo -e "\033[93m[WARN] $msg\033[0m";;
+                error)  echo -e "\033[91m[ERROR] $msg\033[0m";;
+        esac
+}
+
+# [不需要修改]
+function run()
+{
+    check
+    install 
+}
+
+# [可自定义检查操作]
+function check()
+{
+    if [ "$(whoami)" != "root" ]; then
+        log error "当前用户不是 root"
+        exit 1
+    fi
+    if [ -L $APP_SOFT_LINK ]; then
+        log warn "退出安装，软连接已存在：$APP_SOFT_LINK"
+        exit 1
+    fi
+    if [ -d $APP_INSTALL_PATH ]; then
+        log warn "退出安装，该 app 已存在：$APP_INSTALL_PATH"
+        exit 1
+    fi
+    if [ -f $TARBALL ]; then
+        log warn "其他安装进程正在使用文件：$TARBALL"
+        exit 1
+    fi
+}
+
+# [可自定义安装操作]
+function install()
+{
+    log info "正在解压文件 ..."
+
+    if [ ! -d $TMP_HOME ]; then
+        mkdir -pv $TMP_HOME
+    fi
+
+    # 计算 INDEX_OF_THE_END 字符串所在的行数
+    N=$(awk '/^INDEX_OF_THE_END/ {print NR + 1}' $0)
+    #echo $N
+
+    # 把 N 行之后的内容输出到指定的 tar.gz 文件
+    log info "正在提取文件：$TARBALL"
+    tail -n +$N $0 > $TARBALL
+    if [ $? -ne 0 ]; then
+        log error "tail 失败"
+        exit 1
+    fi
+    if [ ! -s $TARBALL ]; then
+        log error "压缩包大小为 0"
+        exit 1
+    fi
+
+    log info "正在解压文件：$TARBALL"
+    tar -zxf $TARBALL -C $APP_INSTALL_HOME
+    if [ $? -ne 0 ]; then
+        log error "tar 失败"
+        exit 1
+    fi
+
+    log info "正在生成软连接："
+    echo -en "\t"
+    ln -sv $APP_INSTALL_PATH $APP_SOFT_LINK
+
+    log info "正在删除临时文件："
+    echo -en "\t"
+    rm -rfv $TARBALL
+
+    log note "完成安装"
+}
+
+# [不需要修改]
+############################### 执行代码 ##################################
+while [ x$agreed = x ]; do
+    echo -n "确定要执行 $(basename $0)？[y/n]: "
+    read reply
+    case $reply in
+            y|Y|yes|Yes|YES)    run; exit 0;;
+            n|N|no|No|NO)       echo "exit"; exit 1;;
+    esac
+done
+    
+# [不能修改]
+# 此字符串是 install.sh 和 tar.gz 文件在 bin 文件里面的分界线  ###########
+INDEX_OF_THE_END
